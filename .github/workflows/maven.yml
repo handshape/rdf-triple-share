@@ -27,4 +27,4 @@ jobs:
       env:
         SLACK_INCOMING_WEBHOOK: ${{ secrets.SLACK_INCOMING_WEBHOOK }}
         SLACK_MESSAGE: 'New successful build by $GITHUB_ACTOR for commit $GITHUB_SHA'
-        SLACK_TITLE: ${{GITHUB_REPOSITORY}}
+        SLACK_TITLE: '$GITHUB_REPOSITORY'
