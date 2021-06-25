@@ -1,6 +1,0 @@
-@prefix justiceacts: <https://laws-lois.justice.gc.ca/eng/acts/> .
-@prefix naics: <http://www.fpml.org/ext/north-american-industry-classification-system/> .
-@prefix app: <http://handshape.com/ext/relationships/> .
-
-justiceacts:F-14 app:affects naics:11411 .
-justiceacts:F-14 app:not-affects naics:541514 .
