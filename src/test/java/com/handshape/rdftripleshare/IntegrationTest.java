@@ -5,6 +5,7 @@ import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -16,7 +17,6 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -47,6 +47,8 @@ import org.jdom2.Document;
 import org.jdom2.Element;
 import org.jdom2.JDOMException;
 import org.jdom2.input.SAXBuilder;
+import org.jsoup.Jsoup;
+import org.jsoup.select.Elements;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -60,6 +62,8 @@ public class IntegrationTest {
     private static final String STATUTORY_INSTRUMENT_PREFIX = "https://www.canada.ca/en/privy-council/ext/statutory-instrument/";
     private static final String ANNUAL_STATUTE_URL_PREFIX = "https://laws.justice.gc.ca/eng/AnnualStatutes/"; // Suffix with "year underscore chapter"
     private static final String LEGIS_URL = "https://laws-lois.justice.gc.ca/eng/XML/Legis.xml";
+    private static final String CONSOLIDATED_INDEX_OF_STATUTORY_INSTRUMENTS_URL
+            = "https://canadagazette.gc.ca/rp-pr/p2/2020/2020-12-31-c4/?-eng.html";
 
     private static final String REFERENCE_CHAPTER_MARKER = ", c. ";
     private static final String REFERENCE_SECTION_MARKER = ", s. ";
@@ -89,7 +93,7 @@ public class IntegrationTest {
         // framework. Mutable shared state because of the accursed streams 
         // framework in the file tree walker.
         MutableBoolean pass = new MutableBoolean(true);
-        Set<String> knownStatutoryInstruments = new HashSet<>();
+        Set<String> knownStatutoryInstruments = new TreeSet<>();
         System.err.println();
 
         // This is the Apache Jena RDF model. In-memory for now. There are persistent implementations we can use later.
@@ -97,6 +101,8 @@ public class IntegrationTest {
 
         // Add local facts and prefixes to the model.
         fetchAndParseLocalTurtle(model, pass);
+
+        fetchAndParseStatutoryInstruments(model, knownStatutoryInstruments);
 
         // Add local facts and prefixes to the model.
         fetchAndParseDepartments(model);
@@ -106,7 +112,6 @@ public class IntegrationTest {
 
         // Add the acts and regs facts to the model.
         fetchAndParseActsAndConsolidatedRegs(model, knownStatutoryInstruments);
-
         // Add the acts and regs facts to the model.
         fetchAndParseMetadata(model);
         Assertions.assertTrue(pass.getValue(), "RDF parsing errors occurred.");
@@ -236,8 +241,9 @@ public class IntegrationTest {
         Iterable<CSVRecord> records = CSVFormat.DEFAULT.withHeader().parse(in);
         for (CSVRecord record : records) {
             final Resource subject = ResourceFactory.createResource(STATUTORY_INSTRUMENT_PREFIX + toUrlSafeId(record.get("instrument_number")));
-            model.add(subject, metadataLabelProperty, record.get("category_item_desc_en"));
-
+            if (record.get("category_item_desc_en") != null && !record.get("category_item_desc_en").isEmpty()) {
+                model.add(subject, metadataLabelProperty, record.get("category_item_desc_en"));
+            }
         }
     }
 
@@ -257,14 +263,80 @@ public class IntegrationTest {
         }
     }
 
-    private void fetchAndParseStatutoryInstrument(Model model, String instrumentId, Set<String> statutoryInstrumentIds, Map<String, String> unknownStatutoryInstrumentIds) throws JDOMException, IOException {
+    private void fetchAndParseStatutoryInstruments(Model model, Set<String> knownStatutoryInstrumentIds) throws JDOMException, IOException {
+        Map<String, String> statutoryInstruments = new TreeMap<>();
+        String[] sections = "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,w,x,y,z,other-autre".split(",");
+        for (String section : sections) {
+            URL u = new URL(CONSOLIDATED_INDEX_OF_STATUTORY_INSTRUMENTS_URL.replace("?", section));
+            Logger.getLogger(IntegrationTest.class
+                    .getName()).log(Level.INFO, "Fetching " + u.toExternalForm());
+            try {
+                org.jsoup.nodes.Document doc = Jsoup.parse(u, 10000);
+                Elements h2 = doc.body().select("h2");
+                for (String text : h2.eachText()) {
+                    if (text.contains("[") && text.contains("]")) {
+                        String instrument = toUrlSafeId(text.substring(text.indexOf("[") + 1, text.indexOf("]")).trim());
+                        String name = text.replaceAll("\\[(^])*\\]", "").trim();
+                        statutoryInstruments.put(instrument, name);
+                    }
+                }
+                Elements actOrdCatEng = doc.body().select("span.actOrdCatEng");
+                for (org.jsoup.nodes.Element el : actOrdCatEng) {
+                    for (String text : el.parent().select("span.actOrdEng").eachText()) {
+                        if (text.contains("C.R.C.,")) {
+                            String instrument = toUrlSafeId(text.substring(text.lastIndexOf("C.R.C.,")).trim());
+                            String name = el.text() + " " + text.substring(0, text.lastIndexOf("C.R.C.,")).replaceAll("\\s+", " ").trim();
+                            statutoryInstruments.put(instrument, name);
+                        } else if (text.contains(",")) {
+                            String instrument = toUrlSafeId(text.substring(text.lastIndexOf(",") + 1).trim());
+                            String name = el.text() + " " + text.substring(0, text.lastIndexOf(",")).replaceAll("\\s+", " ").trim();
+                            statutoryInstruments.put(instrument, name);
+                        }
+
+                    }
+                }
+                Elements actRegEngNoBold = doc.body().select("li.actRegEngNoBold");
+                for (org.jsoup.nodes.Element el : actRegEngNoBold) {
+                    String text = el.selectFirst("strong").text();
+                    if (text.contains("C.R.C.,")) {
+                        String instrument = toUrlSafeId(text.substring(text.lastIndexOf("C.R.C.,")).trim());
+                        String name = text.substring(0, text.lastIndexOf("C.R.C.,")).replaceAll("\\s+", " ").trim();
+                        statutoryInstruments.put(instrument, name);
+                        knownStatutoryInstrumentIds.add(instrument);
+                    } else if (text.contains(",")) {
+                        String instrument = toUrlSafeId(text.substring(text.lastIndexOf(",") + 1).trim());
+                        String name = text.substring(0, text.lastIndexOf(",")).replaceAll("\\s+", " ").trim();
+                        statutoryInstruments.put(instrument, name);
+                        knownStatutoryInstrumentIds.add(instrument);
+                    }
+                }
+            } catch (IOException ex) {
+                Logger.getLogger(IntegrationTest.class
+                        .getName()).log(Level.WARNING, "Failed to fetch " + u.toExternalForm(), ex);
+            }
+        }
+        for (Entry<String, String> entry : statutoryInstruments.entrySet()) {
+//            System.out.println("[" + entry.getKey() + "] " + entry.getValue());
+            if (entry.getKey().startsWith("C.R.C.")
+                    || entry.getKey().startsWith("R.S.C._")
+                    || entry.getKey().startsWith("R.S._")
+                    || entry.getKey().startsWith("S.C._")
+                    || entry.getKey().startsWith("SI-")
+                    || entry.getKey().startsWith("SOR-")) {
+                model.add(ResourceFactory.createResource(STATUTORY_INSTRUMENT_PREFIX + entry.getKey()), this.titleProperty, String.valueOf(entry.getValue()));
+            } else {
+                System.out.println("Unparsable instrument: [" + entry.getKey() + "] " + entry.getValue());
+            }
+        }
+    }
+
+    private void fetchAndParseConsolidatedStatutoryInstrument(Model model, String instrumentId, Set<String> statutoryInstrumentIds, Map<String, String> unknownStatutoryInstrumentIds) throws JDOMException, IOException {
         final Resource amendedReg = ResourceFactory.createResource(STATUTORY_INSTRUMENT_PREFIX + instrumentId);
         SAXBuilder builder = new SAXBuilder();
         final String xmlUrl = "https://laws-lois.justice.gc.ca/eng/XML/" + instrumentId + ".xml";
         System.out.println(xmlUrl);
         Document doc = builder.build(xmlUrl);
         TreeSet<String> amendingRegIds = new TreeSet<>();
-        TreeSet<String> amendingStatuteIds = new TreeSet<>();
         int wordCount = countWordsIn(collectTextFrom(doc.getRootElement()).toString());
         int sectionCount = 0;
         // TODO Numebr of section
@@ -294,15 +366,13 @@ public class IntegrationTest {
                                 ref = ref.substring(0, ref.indexOf(REFERENCE_SECTIONS_MARKER)).trim();
                             }
                             if (ref.matches("\\d{4}") && refChapter != null && refChapter.matches("\\d+")) { // It's one of the annual statutes.
-                                amendingStatuteIds.add(ref + "_" + refChapter);
+                                amendingRegIds.add("S.C._" + ref + ",c._" + refChapter);
+                            } else if (statutoryInstrumentIds.contains(toUrlSafeId(ref))) {
+                                amendingRegIds.add(toUrlSafeId(ref));
                             } else {
-                                if (statutoryInstrumentIds.contains(toUrlSafeId(ref))) {
-                                    amendingRegIds.add(toUrlSafeId(ref));
-                                } else {
-                                    // We may have to come up with a routine to figure out the shorthand that got used here.
-                                    // System.out.println("Unknown reference to amending instrument: " + toUrlSafeId(ref) + " from (" + ref + ")");
-                                    unknownStatutoryInstrumentIds.put(ref, item);
-                                }
+                                // We may have to come up with a routine to figure out the shorthand that got used here.
+                                // System.out.println("Unknown reference to amending instrument: " + toUrlSafeId(ref) + " from (" + ref + ")");
+                                unknownStatutoryInstrumentIds.put(ref, item);
                             }
                         }
                     }
@@ -314,18 +384,12 @@ public class IntegrationTest {
             model.add(amendedReg, consolidatesProperty, amendingReg);
             model.add(amendingReg, amendsInstrumentProperty, amendedReg);
         }
-        for (String amendingStatuteId : amendingStatuteIds) {
-            final Resource amendingStatute = ResourceFactory.createResource(ANNUAL_STATUTE_URL_PREFIX + amendingStatuteId);
-            model.add(amendedReg, consolidatesProperty, amendingStatute);
-            model.add(amendingStatute, amendsInstrumentProperty, amendedReg);
-        }
         model.add(amendedReg, wordCountProperty, String.valueOf(wordCount));
         model.add(amendedReg, sectionCountProperty, String.valueOf(sectionCount));
 
     }
 
     private void fetchAndParseActsAndConsolidatedRegs(Model model, Set<String> knownStatutoryInstruments) throws JDOMException, IOException {
-
         SAXBuilder builder = new SAXBuilder();
         Document doc = builder.build(LEGIS_URL);
         Element actsRegList = doc.getRootElement();
@@ -359,13 +423,12 @@ public class IntegrationTest {
                 attributes.put("instrumentURI", STATUTORY_INSTRUMENT_PREFIX + toUrlSafeId(regElement.getChildTextTrim("UniqueId")));
                 attributes.put("currentToDate", regElement.getChildTextTrim("CurrentToDate"));
                 // The following two properties are language dependent -- we should do the same for French
-                model.add(ResourceFactory.createResource(attributes.get("instrumentURI")), titleProperty,
-                        regElement.getChildTextTrim("Title"), language);
+//                model.add(ResourceFactory.createResource(attributes.get("instrumentURI")), titleProperty,
+//                        regElement.getChildTextTrim("Title"), language);
                 model.add(ResourceFactory.createResource(attributes.get("instrumentURI")), urlProperty,
                         regElement.getChildTextTrim("LinkToHTMLToC"), language);
                 statutoryInstrumentIds.add(uniqueId);
                 knownStatutoryInstruments.add(uniqueId);
-
             }
         }
 
@@ -379,7 +442,6 @@ public class IntegrationTest {
             if (language.equals("en")) {
                 englishActCount++;
                 attributes.put("instrumentURI", STATUTORY_INSTRUMENT_PREFIX + toUrlSafeId(actElement.getChildTextTrim("UniqueId")));
-
                 attributes.put("currentToDate", actElement.getChildTextTrim("CurrentToDate"));
                 if (actElement.getChild("RegsMadeUnderAct") != null) {
                     for (Element reg : actElement.getChild("RegsMadeUnderAct").getChildren("Reg")) {
@@ -401,12 +463,12 @@ public class IntegrationTest {
             }
         }
         for (String statutoryInstrumentId : statutoryInstrumentIds) {
-            fetchAndParseStatutoryInstrument(model, toUrlSafeId(statutoryInstrumentId), knownStatutoryInstruments, unknownStatutoryInstrumentIds);
+            fetchAndParseConsolidatedStatutoryInstrument(model, toUrlSafeId(statutoryInstrumentId), knownStatutoryInstruments, unknownStatutoryInstrumentIds);
         }
         for (Entry<String, String> entry : unknownStatutoryInstrumentIds.entrySet()) {
             System.out.println("Unknown Statutory Instrument ID: " + entry.getKey() + " from " + entry.getValue());
         }
-        System.out.println("Numebr of Unknown Statutory Instruments references: " + unknownStatutoryInstrumentIds.size());
+        System.out.println("Number of Unknown Statutory Instruments references: " + unknownStatutoryInstrumentIds.size());
         Logger.getLogger(IntegrationTest.class
                 .getName()).log(Level.INFO, "English Acts: {0}", englishActCount);
         Logger.getLogger(IntegrationTest.class
@@ -414,7 +476,15 @@ public class IntegrationTest {
     }
 
     private String toUrlSafeId(String item) {
-        return item.trim().replaceAll("/", "-").replaceAll(" ", "_");
+        return item.trim()
+                .replaceAll("/", "-")
+                .replaceAll(" ", "_")
+                //The next few lines address data quality issues in the published set.
+                .replaceAll("_\u2013_", "-")
+                .replaceAll("_\u2014_", "-")
+                .replaceAll("S.C.2020", "S.C._2020")
+                .replaceAll("S._C._", "S.C._")
+                .replaceAll("R.S.C.,", "R.S.C.");
     }
 
     private CharSequence collectTextFrom(Element el) {
